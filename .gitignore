@@ -1,0 +1,25 @@
+## Visual Studio / .NET build outputs
+**/[Bb]in/
+**/[Oo]bj/
+**/[Dd]ebug/
+**/[Rr]elease/
+
+## Visual Studio & IDE cache
+.vs/
+.idea/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+## Heavy binary dependencies (downloaded via script / external)
+engine/bin/
+*.exe
+*.dll
+*.pdb
+
+## Media and temporary recordings
+*.mp4
+*.wav
+*.raw
+*.tmp

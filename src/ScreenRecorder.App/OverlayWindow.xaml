@@ -1,0 +1,102 @@
+<Window x:Class="ScreenRecorder.App.OverlayWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="TeachingOverlay"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        Background="Transparent"
+        Topmost="True"
+        ShowInTaskbar="False"
+        WindowState="Maximized">
+
+    <Window.Resources>
+        <DropShadowEffect x:Key="ToolbarShadow" BlurRadius="20" ShadowDepth="4" Opacity="0.5" Color="#000000"/>
+        <Style x:Key="ToolBtnStyle" TargetType="Button">
+            <Setter Property="Background" Value="#27272A"/>
+            <Setter Property="Foreground" Value="#F4F4F5"/>
+            <Setter Property="Padding" Value="10,6"/>
+            <Setter Property="Margin" Value="2,0"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="FontWeight" Value="Medium"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="{TemplateBinding Background}" CornerRadius="6" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="#3F3F46"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <Style x:Key="ColorBtnStyle" TargetType="Button">
+            <Setter Property="Width" Value="22"/>
+            <Setter Property="Height" Value="22"/>
+            <Setter Property="Margin" Value="3,0"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="{TemplateBinding Background}" CornerRadius="11" BorderThickness="1.5" BorderBrush="#FFFFFF"/>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="ActionBtnStyle" TargetType="Button" BasedOn="{StaticResource ToolBtnStyle}">
+            <Setter Property="Background" Value="#3F3F46"/>
+        </Style>
+
+        <Style x:Key="DoneBtnStyle" TargetType="Button" BasedOn="{StaticResource ToolBtnStyle}">
+            <Setter Property="Background" Value="#6366F1"/>
+            <Setter Property="Foreground" Value="#FFFFFF"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+        </Style>
+    </Window.Resources>
+
+    <Grid x:Name="RootGrid" Background="#01000000"
+          MouseDown="OnMouseDown" MouseMove="OnMouseMove" MouseUp="OnMouseUp">
+        <!-- Persistent drawings on the overlay -->
+        <Canvas x:Name="DrawingCanvas" IsHitTestVisible="False" />
+        
+        <!-- Interactive current shape preview while dragging -->
+        <Canvas x:Name="PreviewCanvas" IsHitTestVisible="False" />
+
+        <!-- Floating Teaching Toolbar -->
+        <Border HorizontalAlignment="Center" VerticalAlignment="Top" Margin="0,20,0,0"
+                Background="#EE18181B" CornerRadius="12" BorderBrush="#3F3F46" BorderThickness="1"
+                Padding="10,6" Effect="{StaticResource ToolbarShadow}">
+            <StackPanel Orientation="Horizontal">
+                <TextBlock Text="Teaching Mode" Foreground="#A1A1AA" VerticalAlignment="Center" FontWeight="SemiBold" FontSize="13" Margin="4,0,16,0"/>
+
+                <Button x:Name="BtnPointer" Content="Cursor" Click="SetTool_Pointer" Style="{StaticResource ToolBtnStyle}"/>
+                <Button x:Name="BtnArrow" Content="Arrow" Click="SetTool_Arrow" Style="{StaticResource ToolBtnStyle}"/>
+                <Button x:Name="BtnRect" Content="Rectangle" Click="SetTool_Rect" Style="{StaticResource ToolBtnStyle}"/>
+                <Button x:Name="BtnUnderline" Content="Underline" Click="SetTool_Underline" Style="{StaticResource ToolBtnStyle}"/>
+                <Button x:Name="BtnPen" Content="Pen" Click="SetTool_Pen" Style="{StaticResource ToolBtnStyle}"/>
+
+                <Separator Width="1" Height="20" Background="#3F3F46" Margin="8,0"/>
+
+                <!-- Color Pickers -->
+                <Button Click="SetColor_Red" Background="#EF4444" Style="{StaticResource ColorBtnStyle}"/>
+                <Button Click="SetColor_Yellow" Background="#EAB308" Style="{StaticResource ColorBtnStyle}"/>
+                <Button Click="SetColor_Green" Background="#22C55E" Style="{StaticResource ColorBtnStyle}"/>
+                <Button Click="SetColor_Blue" Background="#3B82F6" Style="{StaticResource ColorBtnStyle}"/>
+
+                <Separator Width="1" Height="20" Background="#3F3F46" Margin="8,0"/>
+
+                <Button Content="Undo" Click="OnUndo" Style="{StaticResource ActionBtnStyle}"/>
+                <Button Content="Clear" Click="OnClear" Style="{StaticResource ActionBtnStyle}"/>
+                <Button Content="Done" Click="OnCloseOverlay" Style="{StaticResource DoneBtnStyle}"/>
+            </StackPanel>
+        </Border>
+    </Grid>
+</Window>
