@@ -23,3 +23,8 @@ engine/bin/
 *.wav
 *.raw
 *.tmp
+
+## Publish & distribution artifacts
+publish/
+*.zip
+
