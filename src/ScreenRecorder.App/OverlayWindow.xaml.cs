@@ -22,6 +22,8 @@ public partial class OverlayWindow : Window
     private const int WS_EX_TRANSPARENT = 0x00000020;
 
     private readonly AnnotationCompositor _compositor;
+    private TeachingToolbarWindow? _toolbar;
+
     private string _currentTool = "arrow"; // arrow, rectangle, underline, pen, pointer
     private string _currentColor = "#EF4444";
     private float _currentStrokeWidth = 5.0f;
@@ -30,21 +32,41 @@ public partial class OverlayWindow : Window
     private readonly List<PointD> _activeStrokePoints = new();
     private Polyline? _activePolyline;
 
+    public string CurrentTool => _currentTool;
+    public string CurrentColor => _currentColor;
+
     public OverlayWindow(AnnotationCompositor compositor)
     {
         InitializeComponent();
         _compositor = compositor;
+
         Loaded += OnLoaded;
+        KeyDown += OnKeyDown;
     }
 
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
+        EnsureToolbarCreated();
+        _toolbar?.Show();
         UpdateWindowStyles();
+    }
+
+    private void EnsureToolbarCreated()
+    {
+        if (_toolbar == null)
+        {
+            _toolbar = new TeachingToolbarWindow(this)
+            {
+                Owner = this
+            };
+        }
     }
 
     public void EnablePassThrough(bool enable)
     {
         var hwnd = new WindowInteropHelper(this).Handle;
+        if (hwnd == IntPtr.Zero) return;
+
         int extendedStyle = GetWindowLong(hwnd, GWL_EXSTYLE);
         if (enable)
         {
@@ -56,27 +78,80 @@ public partial class OverlayWindow : Window
         }
     }
 
-    private void UpdateWindowStyles()
+    public void UpdateWindowStyles()
     {
-        // When pointer mode is selected, mouse passes through to underlying desktop
-        EnablePassThrough(_currentTool == "pointer");
+        // When pointer (cursor) mode is selected, mouse passes through to underlying desktop
+        bool isPointer = _currentTool == "pointer";
+        EnablePassThrough(isPointer);
+
+        if (isPointer)
+        {
+            Cursor = Cursors.Arrow;
+        }
+        else if (_currentTool == "pen")
+        {
+            Cursor = Cursors.Pen;
+        }
+        else
+        {
+            Cursor = Cursors.Cross;
+        }
     }
 
-    private void SetTool_Pointer(object sender, RoutedEventArgs e) { _currentTool = "pointer"; UpdateWindowStyles(); }
-    private void SetTool_Arrow(object sender, RoutedEventArgs e) { _currentTool = "arrow"; UpdateWindowStyles(); }
-    private void SetTool_Rect(object sender, RoutedEventArgs e) { _currentTool = "rectangle"; UpdateWindowStyles(); }
-    private void SetTool_Underline(object sender, RoutedEventArgs e) { _currentTool = "underline"; UpdateWindowStyles(); }
-    private void SetTool_Pen(object sender, RoutedEventArgs e) { _currentTool = "pen"; UpdateWindowStyles(); }
+    public void SetTool(string tool)
+    {
+        _currentTool = tool;
+        UpdateWindowStyles();
+        _toolbar?.UpdateToolButtonsVisual(tool);
+    }
 
-    private void SetColor_Red(object sender, RoutedEventArgs e) => _currentColor = "#EF4444";
-    private void SetColor_Yellow(object sender, RoutedEventArgs e) => _currentColor = "#EAB308";
-    private void SetColor_Green(object sender, RoutedEventArgs e) => _currentColor = "#22C55E";
-    private void SetColor_Blue(object sender, RoutedEventArgs e) => _currentColor = "#3B82F6";
+    public void SetColor(string color)
+    {
+        _currentColor = color;
+        _toolbar?.UpdateColorButtonsVisual(color);
+    }
+
+    public new void Show()
+    {
+        base.Show();
+        EnsureToolbarCreated();
+        _toolbar?.Show();
+        UpdateWindowStyles();
+    }
+
+    public new void Hide()
+    {
+        _toolbar?.Hide();
+        base.Hide();
+    }
+
+    public new void Close()
+    {
+        _toolbar?.Close();
+        base.Close();
+    }
+
+    private void OnKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.Escape)
+        {
+            if (_currentTool != "pointer")
+            {
+                SetTool("pointer");
+            }
+            else
+            {
+                Hide();
+            }
+            e.Handled = true;
+        }
+    }
 
     private void OnMouseDown(object sender, MouseButtonEventArgs e)
     {
         if (e.LeftButton != MouseButtonState.Pressed || _currentTool == "pointer") return;
 
+        RootGrid.CaptureMouse();
         var pos = e.GetPosition(this);
         _startPoint = pos;
         _activeStrokePoints.Clear();
@@ -154,6 +229,8 @@ public partial class OverlayWindow : Window
     private void OnMouseUp(object sender, MouseButtonEventArgs e)
     {
         if (_startPoint == null) return;
+        RootGrid.ReleaseMouseCapture();
+
         var endPos = e.GetPosition(this);
         PreviewCanvas.Children.Clear();
 
@@ -178,10 +255,9 @@ public partial class OverlayWindow : Window
                 Points = points
             };
 
-            // 1. Send to engine for recording video burn-in compositing
-            _compositor.AddAnnotation(ann);
-
-            // 2. Render onto visual canvas
+            // Render single crisp vector annotation onto visual canvas.
+            // Screen capturer captures the screen directly via BitBlt, so we do not
+            // double-burn it through the GDI+ compositor (which caused duplicate/doubled lines).
             RenderAnnotationToCanvas(ann, DrawingCanvas);
         }
 
@@ -251,6 +327,8 @@ public partial class OverlayWindow : Window
 
     private void DrawArrowVisual(Canvas canvas, System.Windows.Point p1, System.Windows.Point p2, Brush brush, float strokeWidth)
     {
+        var group = new Canvas();
+
         var line = new Line
         {
             X1 = p1.X,
@@ -262,7 +340,7 @@ public partial class OverlayWindow : Window
             StrokeStartLineCap = PenLineCap.Round,
             StrokeEndLineCap = PenLineCap.Round
         };
-        canvas.Children.Add(line);
+        group.Children.Add(line);
 
         double angle = Math.Atan2(p2.Y - p1.Y, p2.X - p1.X);
         double arrowSize = Math.Max(16.0, strokeWidth * 3.5);
@@ -282,27 +360,24 @@ public partial class OverlayWindow : Window
             Fill = brush,
             Points = new PointCollection { p2, head1, head2 }
         };
-        canvas.Children.Add(polygon);
+        group.Children.Add(polygon);
+
+        canvas.Children.Add(group);
     }
 
-    private void OnUndo(object sender, RoutedEventArgs e)
+    public void Undo()
     {
-        _compositor.Undo();
+        _compositor?.Undo();
         if (DrawingCanvas.Children.Count > 0)
         {
             DrawingCanvas.Children.RemoveAt(DrawingCanvas.Children.Count - 1);
         }
     }
 
-    private void OnClear(object sender, RoutedEventArgs e)
+    public void Clear()
     {
-        _compositor.Clear();
+        _compositor?.Clear();
         DrawingCanvas.Children.Clear();
         PreviewCanvas.Children.Clear();
-    }
-
-    private void OnCloseOverlay(object sender, RoutedEventArgs e)
-    {
-        Hide();
     }
 }

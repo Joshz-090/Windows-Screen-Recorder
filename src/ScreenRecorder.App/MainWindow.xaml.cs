@@ -375,6 +375,12 @@ public partial class MainWindow : Window
         if (_overlayWindow == null)
         {
             _overlayWindow = new OverlayWindow(_compositor);
+            _overlayWindow.IsVisibleChanged += (s, ev) =>
+            {
+                BtnTeaching.Background = _overlayWindow.IsVisible
+                    ? (Brush)new BrushConverter().ConvertFromString("#4F46E5")!
+                    : (Brush)new BrushConverter().ConvertFromString("#27272A")!;
+            };
         }
 
         if (_overlayWindow.IsVisible)

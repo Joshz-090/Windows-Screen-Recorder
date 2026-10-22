@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
 using NAudio.Wave.SampleProviders;
@@ -21,6 +22,10 @@ public class AudioCaptureManager : IDisposable
     public float CurrentSystemLevel { get; private set; }
 
     private bool _isRecording;
+    private bool _isPaused;
+    private long _recordingStartTicks;
+    private long _totalPausedTicks;
+    private long _lastPauseStartTicks;
     private Thread? _audioPumpingThread;
     private readonly WaveFormat _targetFormat = WaveFormat.CreateIeeeFloatWaveFormat(48000, 2);
 
@@ -68,11 +73,38 @@ public class AudioCaptureManager : IDisposable
         return list;
     }
 
+    private static ISampleProvider NormalizeToTarget(ISampleProvider source, int targetSampleRate = 48000)
+    {
+        ISampleProvider current = source;
+
+        // 1. Ensure 2 channels (stereo)
+        if (current.WaveFormat.Channels == 1)
+        {
+            current = new MonoToStereoSampleProvider(current);
+        }
+        else if (current.WaveFormat.Channels > 2)
+        {
+            current = new ChannelsToStereoSampleProvider(current);
+        }
+
+        // 2. Ensure target sample rate (48000 Hz)
+        if (current.WaveFormat.SampleRate != targetSampleRate)
+        {
+            current = new WdlResamplingSampleProvider(current, targetSampleRate);
+        }
+
+        return current;
+    }
+
     public void Start(string? micDeviceId, bool captureSystemAudio)
     {
         lock (_lock)
         {
             if (_isRecording) return;
+            _recordingStartTicks = Stopwatch.GetTimestamp();
+            _totalPausedTicks = 0;
+            _lastPauseStartTicks = 0;
+            _isPaused = false;
             _isRecording = true;
 
             using var enumerator = new MMDeviceEnumerator();
@@ -99,25 +131,19 @@ public class AudioCaptureManager : IDisposable
                         _micBuffer = new BufferedWaveProvider(_micCapture.WaveFormat)
                         {
                             DiscardOnBufferOverflow = true,
-                            BufferDuration = TimeSpan.FromSeconds(2)
+                            ReadFully = true,
+                            BufferDuration = TimeSpan.FromSeconds(5)
                         };
 
                         var micSamples = _micBuffer.ToSampleProvider();
-                        if (micSamples.WaveFormat.SampleRate != 48000 || micSamples.WaveFormat.Channels != 2)
-                        {
-                            _micSampleProvider = new WdlResamplingSampleProvider(
-                                micSamples.WaveFormat.Channels == 1 ? (ISampleProvider)new MonoToStereoSampleProvider(micSamples) : micSamples,
-                                48000
-                            );
-                        }
-                        else
-                        {
-                            _micSampleProvider = micSamples;
-                        }
+                        _micSampleProvider = NormalizeToTarget(micSamples, 48000);
 
                         _micCapture.DataAvailable += (s, e) =>
                         {
-                            _micBuffer.AddSamples(e.Buffer, 0, e.BytesRecorded);
+                            if (!Volatile.Read(ref _isPaused))
+                            {
+                                _micBuffer.AddSamples(e.Buffer, 0, e.BytesRecorded);
+                            }
                             CalculateLevel(e.Buffer, e.BytesRecorded, _micCapture.WaveFormat, true);
                         };
                         _micCapture.StartRecording();
@@ -141,25 +167,19 @@ public class AudioCaptureManager : IDisposable
                         _loopbackBuffer = new BufferedWaveProvider(_loopbackCapture.WaveFormat)
                         {
                             DiscardOnBufferOverflow = true,
-                            BufferDuration = TimeSpan.FromSeconds(2)
+                            ReadFully = true,
+                            BufferDuration = TimeSpan.FromSeconds(5)
                         };
 
                         var loopbackSamples = _loopbackBuffer.ToSampleProvider();
-                        if (loopbackSamples.WaveFormat.SampleRate != 48000 || loopbackSamples.WaveFormat.Channels != 2)
-                        {
-                            _loopbackSampleProvider = new WdlResamplingSampleProvider(
-                                loopbackSamples.WaveFormat.Channels == 1 ? (ISampleProvider)new MonoToStereoSampleProvider(loopbackSamples) : loopbackSamples,
-                                48000
-                            );
-                        }
-                        else
-                        {
-                            _loopbackSampleProvider = loopbackSamples;
-                        }
+                        _loopbackSampleProvider = NormalizeToTarget(loopbackSamples, 48000);
 
                         _loopbackCapture.DataAvailable += (s, e) =>
                         {
-                            _loopbackBuffer.AddSamples(e.Buffer, 0, e.BytesRecorded);
+                            if (!Volatile.Read(ref _isPaused))
+                            {
+                                _loopbackBuffer.AddSamples(e.Buffer, 0, e.BytesRecorded);
+                            }
                             CalculateLevel(e.Buffer, e.BytesRecorded, _loopbackCapture.WaveFormat, false);
                         };
                         _loopbackCapture.StartRecording();
@@ -190,6 +210,31 @@ public class AudioCaptureManager : IDisposable
                 Priority = ThreadPriority.AboveNormal
             };
             _audioPumpingThread.Start();
+        }
+    }
+
+    public void Pause()
+    {
+        lock (_lock)
+        {
+            if (!_isRecording || _isPaused) return;
+            Volatile.Write(ref _lastPauseStartTicks, Stopwatch.GetTimestamp());
+            Volatile.Write(ref _isPaused, true);
+            _micBuffer?.ClearBuffer();
+            _loopbackBuffer?.ClearBuffer();
+        }
+    }
+
+    public void Resume()
+    {
+        lock (_lock)
+        {
+            if (!_isRecording || !_isPaused) return;
+            long pauseDurationTicks = Stopwatch.GetTimestamp() - Volatile.Read(ref _lastPauseStartTicks);
+            Interlocked.Add(ref _totalPausedTicks, pauseDurationTicks);
+            _micBuffer?.ClearBuffer();
+            _loopbackBuffer?.ClearBuffer();
+            Volatile.Write(ref _isPaused, false);
         }
     }
 
@@ -224,28 +269,81 @@ public class AudioCaptureManager : IDisposable
     private void PumpAudioLoop()
     {
         // 48000 Hz, stereo (2 channels), 4 bytes per float sample = 384,000 bytes/sec
-        // Emit 20ms chunks: 48000 * 0.02 = 960 samples * 2 channels = 1920 floats = 7680 bytes
-        const int samplesPerChunk = 960 * 2;
-        float[] sampleBuffer = new float[samplesPerChunk];
-        byte[] byteBuffer = new byte[samplesPerChunk * 4];
+        // Maximum burst chunk size: 4800 frames = 100ms
+        float[] sampleBuffer = new float[4800 * 2];
+        byte[] byteBuffer = new byte[4800 * 2 * 4];
+        long totalFramesWritten = 0;
 
         while (_isRecording)
         {
-            long startTicks = DateTime.UtcNow.Ticks;
-
-            int read = _mixer?.Read(sampleBuffer, 0, samplesPerChunk) ?? 0;
-            if (read > 0)
+            if (Volatile.Read(ref _isPaused))
             {
-                Buffer.BlockCopy(sampleBuffer, 0, byteBuffer, 0, read * 4);
-                AudioDataAvailable?.Invoke(byteBuffer, read * 4);
+                Thread.Sleep(10);
+                continue;
             }
 
-            // Sleep to pace ~20ms
-            long elapsedMs = (DateTime.UtcNow.Ticks - startTicks) / TimeSpan.TicksPerMillisecond;
-            int sleepTime = (int)(20 - elapsedMs);
-            if (sleepTime > 0)
+            long now = Stopwatch.GetTimestamp();
+            long pausedTicks = Volatile.Read(ref _totalPausedTicks);
+            long elapsedTicks = now - _recordingStartTicks - pausedTicks;
+            if (elapsedTicks < 0) elapsedTicks = 0;
+
+            double elapsedSeconds = (double)elapsedTicks / Stopwatch.Frequency;
+            long targetTotalFrames = (long)(elapsedSeconds * 48000.0);
+            long framesDue = targetTotalFrames - totalFramesWritten;
+
+            if (framesDue <= 0)
             {
-                Thread.Sleep(sleepTime);
+                Thread.Sleep(5);
+                continue;
+            }
+
+            int framesToRead = (int)Math.Min(framesDue, 4800);
+            int samplesToRead = framesToRead * 2;
+
+            if (sampleBuffer.Length < samplesToRead)
+            {
+                sampleBuffer = new float[samplesToRead];
+                byteBuffer = new byte[samplesToRead * 4];
+            }
+
+            int samplesRead = _mixer?.Read(sampleBuffer, 0, samplesToRead) ?? 0;
+            if (samplesRead > 0)
+            {
+                Buffer.BlockCopy(sampleBuffer, 0, byteBuffer, 0, samplesRead * 4);
+                AudioDataAvailable?.Invoke(byteBuffer, samplesRead * 4);
+                totalFramesWritten += (samplesRead / 2);
+            }
+            else
+            {
+                Thread.Sleep(5);
+            }
+        }
+
+        // On stop: drain remaining frames up to the final elapsed recording time
+        // to guarantee audio duration matches wall-clock recording duration exactly.
+        long finalNow = Stopwatch.GetTimestamp();
+        long finalPaused = Volatile.Read(ref _totalPausedTicks);
+        long finalTicks = finalNow - _recordingStartTicks - finalPaused;
+        if (finalTicks > 0)
+        {
+            double finalSec = (double)finalTicks / Stopwatch.Frequency;
+            long finalTargetFrames = (long)(finalSec * 48000.0);
+            long remaining = finalTargetFrames - totalFramesWritten;
+            while (remaining > 0)
+            {
+                int toRead = (int)Math.Min(remaining, 4800);
+                int samplesToRead = toRead * 2;
+                if (sampleBuffer.Length < samplesToRead)
+                {
+                    sampleBuffer = new float[samplesToRead];
+                    byteBuffer = new byte[samplesToRead * 4];
+                }
+                int samplesRead = _mixer?.Read(sampleBuffer, 0, samplesToRead) ?? 0;
+                if (samplesRead <= 0) break;
+                Buffer.BlockCopy(sampleBuffer, 0, byteBuffer, 0, samplesRead * 4);
+                AudioDataAvailable?.Invoke(byteBuffer, samplesRead * 4);
+                totalFramesWritten += (samplesRead / 2);
+                remaining -= (samplesRead / 2);
             }
         }
     }
@@ -260,7 +358,7 @@ public class AudioCaptureManager : IDisposable
             try { _micCapture?.StopRecording(); } catch { }
             try { _loopbackCapture?.StopRecording(); } catch { }
 
-            _audioPumpingThread?.Join(500);
+            _audioPumpingThread?.Join(3000);
 
             _micCapture?.Dispose();
             _micCapture = null;
@@ -273,5 +371,45 @@ public class AudioCaptureManager : IDisposable
     public void Dispose()
     {
         Stop();
+    }
+}
+
+/// <summary>
+/// Helper sample provider that extracts or downmixes any multichannel stream (>2 channels)
+/// to standard stereo (2 channels).
+/// </summary>
+internal sealed class ChannelsToStereoSampleProvider : ISampleProvider
+{
+    private readonly ISampleProvider _source;
+    private readonly int _sourceChannels;
+    private float[] _sourceBuffer = Array.Empty<float>();
+
+    public ChannelsToStereoSampleProvider(ISampleProvider source)
+    {
+        _source = source;
+        _sourceChannels = source.WaveFormat.Channels;
+        WaveFormat = WaveFormat.CreateIeeeFloatWaveFormat(source.WaveFormat.SampleRate, 2);
+    }
+
+    public WaveFormat WaveFormat { get; }
+
+    public int Read(float[] buffer, int offset, int count)
+    {
+        int framesRequested = count / 2;
+        int sourceSamplesNeeded = framesRequested * _sourceChannels;
+        if (_sourceBuffer.Length < sourceSamplesNeeded)
+            _sourceBuffer = new float[sourceSamplesNeeded];
+
+        int sourceSamplesRead = _source.Read(_sourceBuffer, 0, sourceSamplesNeeded);
+        int framesRead = sourceSamplesRead / _sourceChannels;
+
+        int outIdx = offset;
+        for (int i = 0; i < framesRead; i++)
+        {
+            int srcIdx = i * _sourceChannels;
+            buffer[outIdx++] = _sourceBuffer[srcIdx];
+            buffer[outIdx++] = _sourceChannels > 1 ? _sourceBuffer[srcIdx + 1] : _sourceBuffer[srcIdx];
+        }
+        return framesRead * 2;
     }
 }

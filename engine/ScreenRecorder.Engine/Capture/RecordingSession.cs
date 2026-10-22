@@ -33,8 +33,18 @@ public class RecordingSession : IDisposable
     public double CurrentActualFps { get; private set; }
     public float CurrentMicLevel => _audioManager.CurrentMicLevel;
     public float CurrentSystemLevel => _audioManager.CurrentSystemLevel;
-    public long ElapsedMs => _elapsedStopwatch.ElapsedMilliseconds - _totalPausedMs
-        - (_isPaused ? (_elapsedStopwatch.ElapsedMilliseconds - _lastPauseStartMs) : 0);
+    public long ElapsedMs
+    {
+        get
+        {
+            // Use Volatile.Read to prevent stale cached values when read from another thread.
+            bool paused      = Volatile.Read(ref _isPaused);
+            long pausedTotal = Volatile.Read(ref _totalPausedMs);
+            long pauseStart  = Volatile.Read(ref _lastPauseStartMs);
+            long elapsed     = _elapsedStopwatch.ElapsedMilliseconds;
+            return elapsed - pausedTotal - (paused ? (elapsed - pauseStart) : 0);
+        }
+    }
     public bool IsPaused => _isPaused;
     public string OutputPath => _outputPath;
 
@@ -113,19 +123,22 @@ public class RecordingSession : IDisposable
 
     public void Pause()
     {
-        if (_isRunning && !_isPaused)
+        if (_isRunning && !Volatile.Read(ref _isPaused))
         {
-            _isPaused = true;
-            _lastPauseStartMs = _elapsedStopwatch.ElapsedMilliseconds;
+            Volatile.Write(ref _lastPauseStartMs, _elapsedStopwatch.ElapsedMilliseconds);
+            Volatile.Write(ref _isPaused, true);
+            _audioManager.Pause();
         }
     }
 
     public void Resume()
     {
-        if (_isRunning && _isPaused)
+        if (_isRunning && Volatile.Read(ref _isPaused))
         {
-            _totalPausedMs += (_elapsedStopwatch.ElapsedMilliseconds - _lastPauseStartMs);
-            _isPaused = false;
+            long pauseDuration = _elapsedStopwatch.ElapsedMilliseconds - Volatile.Read(ref _lastPauseStartMs);
+            Interlocked.Add(ref _totalPausedMs, pauseDuration);
+            Volatile.Write(ref _isPaused, false);
+            _audioManager.Resume();
         }
     }
 
@@ -215,8 +228,18 @@ public class RecordingSession : IDisposable
 
         onProgress?.Invoke(5, "Stopping screen capture loop...");
 
-        // Ensure that any frames remaining up to the exact moment of Stop() are written
-        // so the video duration matches wall-clock elapsed time perfectly.
+        // 1. Wait for the video capture thread to exit cleanly before touching encoder or frame counts
+        if (_videoThread != null && _videoThread.IsAlive)
+        {
+            if (!_videoThread.Join(8000))
+            {
+                _videoThread.Interrupt();
+                _videoThread.Join(1000);
+            }
+        }
+
+        // 2. Ensure that any frames remaining up to the exact moment of Stop() are written
+        // so the video duration matches wall-clock elapsed time perfectly without race conditions.
         long finalElapsedMs = ElapsedMs;
         long finalTargetFrames = (long)((finalElapsedMs * _targetFps) / 1000.0);
         if (_lastFrame != null && EncodedFrames < finalTargetFrames)
@@ -226,16 +249,6 @@ public class RecordingSession : IDisposable
             {
                 _encoder.WriteVideoFrame(_lastFrame);
                 EncodedFrames++;
-            }
-        }
-
-        // 1. Wait for the video capture thread to finish sending all frames
-        if (_videoThread != null && _videoThread.IsAlive)
-        {
-            if (!_videoThread.Join(8000))
-            {
-                _videoThread.Interrupt();
-                _videoThread.Join(1000);
             }
         }
 
@@ -262,8 +275,11 @@ public class RecordingSession : IDisposable
             audioPath = _tempAudioPath;
         }
 
-        // 3. Finalise video encoding and mux audio into the output file
-        _encoder.Finish(audioPath, onProgress);
+        // 3. Finalise video encoding and mux audio into the output file.
+        // Pass the actual elapsed recording time so the encoder can pad audio
+        // silence to the correct video length (eliminates -shortest truncation bug).
+        double recDurationSeconds = finalElapsedMs / 1000.0;
+        _encoder.Finish(audioPath, onProgress, recDurationSeconds);
 
         // 4. Delete the temp audio WAV now that it has been muxed
         if (audioPath != null)

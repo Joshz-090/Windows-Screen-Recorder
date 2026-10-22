@@ -42,6 +42,49 @@ public class Program
             return;
         }
 
+        if (args[0] == "--record-test-pause")
+        {
+            string outputPath = args.Length > 1 ? args[1] : Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "test_pause_recording.mp4");
+            Console.WriteLine($"Starting pause-resume test recording to: {outputPath}");
+
+            var sources = WindowsScreenCapturer.EnumerateDisplays();
+            var primary = sources.FirstOrDefault(s => s.IsPrimary) ?? sources[0];
+            string ffmpegPath = FindFFmpegPath();
+
+            var session = new RecordingSession(
+                source: primary,
+                targetWidth: primary.Width,
+                targetHeight: primary.Height,
+                fps: 30,
+                micDeviceId: "default",
+                captureSystemAudio: true,
+                outputPath: outputPath,
+                ffmpegPath: ffmpegPath,
+                encoderName: "libx264",
+                compositor: _compositor
+            );
+
+            session.Start();
+            Console.WriteLine("[CLI] Recording phase 1 (2s)...");
+            await Task.Delay(2000);
+
+            Console.WriteLine("[CLI] Pausing for 2s...");
+            session.Pause();
+            await Task.Delay(2000);
+
+            Console.WriteLine("[CLI] Resuming phase 2 (2s)...");
+            session.Resume();
+            await Task.Delay(2000);
+
+            Console.WriteLine("[CLI] Stopping session...");
+            session.Stop();
+            session.Dispose();
+
+            var fileInfo = new FileInfo(outputPath);
+            Console.WriteLine($"[CLI] Pause-resume recording completed! File size: {fileInfo.Length / 1024} KB.");
+            return;
+        }
+
         if (args[0] == "--record-test")
         {
             int durationSec = args.Length > 1 && int.TryParse(args[1], out int d) ? d : 5;
